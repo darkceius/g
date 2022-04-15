@@ -1,0 +1,411 @@
+local ListVar
+local UtilityVar
+local MaidVar
+local LayoutVar
+
+
+do
+	-- Variables
+
+
+	local Maid = {}
+	Maid.__index = Maid
+
+
+	-- Public
+
+
+	function Maid:GiveTask(task)
+		local index = #self._tasks + 1
+		self._tasks[index] = task
+
+		return function()
+			self._tasks[index] = nil
+		end
+	end
+
+
+	function Maid:GiveTasks(...)
+		for _, task in next, {...} do
+			self:GiveTask(task)
+		end
+	end
+
+
+	function Maid:DoCleaning()
+		for index, task in next, self._tasks do
+			self._tasks[index] = nil
+
+			local T = type(task)
+			if T == 'table' then
+				task:Destroy()
+			elseif T == 'function' then
+				task()
+			else -- RbxScriptConnection
+				task:Disconnect()
+			end
+		end
+	end
+
+
+	Maid.Destroy = Maid.DoCleaning
+
+
+	-- Constructor
+
+
+	function Maid.new()
+		return setmetatable({
+			_tasks = {}
+		}, Maid)
+	end
+
+
+	-- Export
+
+
+	MaidVar = Maid
+end
+
+do
+	local libs = script.Parent.Parent
+	local Maid = MaidVar
+
+	local Layout = {}
+
+
+	-- Public
+
+
+	function Layout:UpdatePadding()
+		self:_updatePadding(true)
+	end
+
+
+	function Layout:UpdateSize()
+		self:_updateSize(true)
+	end
+
+
+	function Layout:UpdateCanvas()
+		self:_updateCanvas(true)
+	end
+
+
+	function Layout:Update()
+		self._scrollFrame.CanvasSize = UDim2.new()
+		self:_update(true)
+	end
+
+
+	function Layout:Play()
+		if not self.Paused then return end
+		self.Paused = false
+
+		self._scrollFrame.CanvasSize = UDim2.new()
+		self:_update()
+	end
+
+
+	function Layout:Pause()
+		self.Paused = true
+	end
+
+
+	function Layout:Destroy()
+		self.Destroyed = true
+		self._maid:DoCleaning()
+
+		setmetatable(self, nil)
+	end
+
+
+	-- Constructor
+
+
+	function Layout.new(layout: UIGridLayout | UIListLayout) -- would specify return type, but makes the linter funky
+		assert(layout.Parent and layout.Parent:IsA('ScrollingFrame'), 'Layout must have parent of type ScrollingFrame')
+
+		return {
+			Ref = layout,
+
+			Paused = true,
+			Destroyed = false,
+
+			DoUpdatePadding = true,
+			DoUpdateSize = true,
+			DoUpdateCanvas = true,
+
+			_scrollFrame = layout.Parent,
+			_maid = Maid.new()
+		}
+	end
+
+
+	-- Export
+
+
+	LayoutVar = Layout
+end
+
+
+do
+	local Utility = {}
+
+	function Utility.fastRemove(tbl: {number: any}, index: number) -- would use {any}, but it makes the linter angry
+		local n = #tbl
+		tbl[index] = tbl[n]
+		tbl[n] = nil
+	end
+
+
+	function Utility.ser(...)
+		local str = ''
+		for _, num in next, {...} do
+			str = str..math.floor(num)
+		end
+
+		return tonumber(str)
+	end
+
+
+	function Utility.toScale(scale: number, offset: number, parentSize: number): number
+		return (offset / parentSize) + scale
+	end
+
+
+	function Utility.toOffset(scale: number, offset: number, parentSize: number): number
+		return (scale * parentSize) + offset
+	end
+
+
+	function Utility.convert(obj: GuiObject | UILayout, prop: string, T: string): UDim2 | UDim
+		local parentSize = obj.Parent.AbsoluteSize
+		local ud = obj[prop]
+
+		local to = T == 'Scale' and Utility.toScale or Utility.toOffset
+		if typeof(obj[prop]) == 'UDim2' then
+			return UDim2['from'..T](to(ud.X.Scale, ud.X.Offset, parentSize.X), to(ud.Y.Scale, ud.Y.Offset, parentSize.Y))
+		else
+			local axis = 'X'
+			if obj:IsA('UIListLayout') then
+				axis = obj.FillDirection == Enum.FillDirection.Horizontal and 'X' or 'Y'
+			end
+
+			local data = {
+				[T] = to(ud.Scale, ud.Offset, parentSize[axis])
+			}
+
+			return UDim.new(data.Scale, data.Offset)
+		end
+	end
+
+
+	-- Export
+
+
+	UtilityVar = Utility
+end
+
+do
+	local Utility = UtilityVar
+	local Maid = MaidVar
+	local Layout = LayoutVar
+
+	local List = {}
+
+
+	-- Internal
+
+	function List:__index(key)
+		return rawget(self, key) or List[key] or Layout[key]
+	end
+
+
+	function List:__tostring()
+		return ('List(%s)'):format(self.Ref.Name)
+	end
+
+
+	function List:_isValid(T, bool)
+		return bool or (self['DoUpdate'..T] and not self.Paused and not self.Destroyed)
+	end
+
+
+	function List:_updateObject(object)
+		local s = object.size
+		local size = Vector2.new(s.X.Scale, s.Y.Scale) * self._scrollFrame.AbsoluteSize
+
+		object.queue[Utility.ser(size.X, size.Y)] = true
+		object.ref.Size = UDim2.fromOffset(size.X, size.Y)
+	end
+
+
+	function List:_addObject(object, noUpdate)
+		local tbl = {
+			ref = object,
+			size = Utility.convert(object, 'Size', 'Scale'),
+			queue = {}
+		}
+		table.insert(self._children, tbl)
+
+		local maid = Maid.new()
+		self._maid:GiveTask(maid)
+
+		maid:GiveTasks(
+			object:GetPropertyChangedSignal('Size'):Connect(function()
+				local size = object.Size
+				local key = Utility.ser(size.X.Offset, size.Y.Offset)
+
+				if size.X.Scale ~= 0 or size.Y.Scale ~= 0 or not tbl.queue[key] then
+					tbl.size = Utility.convert(object, 'Size', 'Scale')
+
+					if not self:_isValid('Size') then return end
+					self:_updateObject(tbl)
+				else
+					tbl.queue[key] = nil
+				end
+			end),
+
+			object:GetPropertyChangedSignal('Parent'):Connect(function()
+				if not object.Parent then
+					maid:DoCleaning()
+
+					local index = table.find(self._children, tbl)
+					if index then
+						Utility.fastRemove(self._children, index)
+					end
+				end
+			end)
+		)
+
+		if not noUpdate and self:_isValid('Size') then
+			self:_updateObject(tbl)
+		end
+	end
+
+
+	function List:_updateCanvas(bypass)
+		if not self:_isValid('Canvas', bypass) then return end
+
+		local contentSize = self.Ref.AbsoluteContentSize
+		local canvas = {X = contentSize.X, Y = contentSize.Y}
+		for axis, _ in next, canvas do
+			if math.floor(contentSize[axis]) == math.floor(self._scrollFrame.AbsoluteSize[axis]) then
+				canvas[axis] = 0
+			end
+		end
+
+		self._scrollFrame.CanvasSize = UDim2.fromOffset(canvas.X, canvas.Y)
+	end
+
+
+	function List:_updatePadding(bypass)
+		if not self:_isValid('Padding', bypass) then return end
+
+		local axis = self.Ref.FillDirection == Enum.FillDirection.Horizontal and 'X' or 'Y'
+		local offset = self._padding * self._scrollFrame.AbsoluteSize[axis]
+
+		self._paddingQueue[Utility.ser(offset)] = true
+		self.Ref.Padding = UDim.new(0, offset)
+	end
+
+
+	function List:_updateSize(bypass)
+		if not self:_isValid('Size', bypass) then return end
+
+		for _, object in next, self._children do
+			self:_updateObject(object)
+		end
+	end
+
+
+	function List:_update(bypass)
+		self:_updatePadding(bypass)
+		self:_updateSize(bypass)
+		self:_updateCanvas(bypass)
+	end
+
+
+	-- Constructor
+
+
+	function List.new(layout: UIListLayout, noStartup: boolean?)
+		local self = setmetatable(Layout.new(layout), List)
+
+		self._children = {}
+
+		self._paddingQueue = {}
+		self._padding = Utility.convert(layout, 'Padding', 'Scale').Scale
+
+		self._maid:GiveTasks(
+			layout:GetPropertyChangedSignal('Parent'):Connect(function()
+				self:Destroy()
+
+				if layout.Parent and layout.Parent:IsA('ScrollingFrame') then
+					setmetatable(self, List.new(layout))
+				end
+			end),
+
+			layout:GetPropertyChangedSignal('Padding'):Connect(function()
+				local p = layout.Padding
+				if not self._paddingQueue[p.Offset] then
+					self._padding = Utility.convert(layout, 'Padding', 'Scale').Scale
+					self:_updatePadding()
+				else
+					self._paddingQueue[p.Offset] = nil
+				end
+			end),
+
+			layout:GetPropertyChangedSignal('AbsoluteContentSize'):Connect(function()
+				self:_updateCanvas()
+			end),
+
+			layout:GetPropertyChangedSignal('FillDirection'):Connect(function()
+				self:_updateCanvas()
+			end),
+
+			self._scrollFrame.ChildAdded:Connect(function(object)
+				if object:IsA('GuiObject') then
+					self:_addObject(object, self.Paused)
+				end
+			end),
+
+			self._scrollFrame:GetPropertyChangedSignal('AbsoluteSize'):Connect(function()
+				self:_update()
+			end)
+		)
+
+		for _, object in next, self._scrollFrame:GetChildren() do
+			if object:IsA('GuiObject') then
+				self:_addObject(object, noStartup)
+			end
+		end
+
+		if not noStartup then
+			self:Play()
+		end
+
+		return self
+	end
+	
+
+	
+
+	-- Export
+	ListVar = ListVar	
+end
+
+return {
+	new = function (layout: ScrollingFrame | UIGridLayout | UIListLayout, noStartup: boolean?) -- if I specify the return type, the linter gets angry
+		if layout:IsA('ScrollingFrame') then
+			layout = layout:FindFirstChildOfClass('UIGridLayout') or layout:FindFirstChildOfClass('UIListLayout')
+
+			if not layout then
+				error('bad argument #1, ScrollingFrame must contain a UILayout')
+			end
+		end
+
+		return ListVar.new(layout, noStartup)
+	end
+}
